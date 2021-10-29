@@ -3,32 +3,39 @@
 // See the LICENSE file in the project root for more information.
 
 using System;
+using System.Collections.Immutable;
 using System.Composition;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis.Host.Mef;
 using Microsoft.CodeAnalysis.Shared.Utilities;
+using Microsoft.VisualStudio.Debugger.Contracts;
 
 namespace Microsoft.CodeAnalysis.PdbSourceDocument
 {
     [Export(typeof(IPdbFileLocatorService)), Shared]
     internal sealed class PdbFileLocatorService : IPdbFileLocatorService
     {
+        private readonly IDebuggerSymbolLocatorService _debuggerSymbolLocatorService;
+
         [ImportingConstructor]
         [Obsolete(MefConstruction.ImportingConstructorMessage, error: true)]
-        public PdbFileLocatorService()
+        public PdbFileLocatorService(IDebuggerSymbolLocatorService debuggerSymbolLocatorService)
         {
+            _debuggerSymbolLocatorService = debuggerSymbolLocatorService;
         }
 
-        public Task<DocumentDebugInfoReader?> GetDocumentDebugInfoReaderAsync(string dllPath, CancellationToken cancellationToken)
+        public async Task<DocumentDebugInfoReader?> GetDocumentDebugInfoReaderAsync(string dllPath, CancellationToken cancellationToken)
         {
             var dllStream = IOUtilities.PerformIO(() => File.OpenRead(dllPath));
             if (dllStream is null)
-                return Task.FromResult<DocumentDebugInfoReader?>(null);
+                return null;
 
             Stream? pdbStream = null;
             DocumentDebugInfoReader? result = null;
@@ -74,6 +81,44 @@ namespace Microsoft.CodeAnalysis.PdbSourceDocument
                     // - DLL Path
                     // 
                     // Most of this info comes from the CodeView Debug Directory from the dll
+
+                    var entry = peReader.ReadDebugDirectory().FirstOrDefault(x => x.Type == DebugDirectoryEntryType.CodeView);
+                    if (entry.Type != DebugDirectoryEntryType.Unknown)
+                    {
+                        var codeViewEntry = peReader.ReadCodeViewDebugDirectoryData(entry);
+
+                        // check for presence of pdb checksums
+                        var checksums = peReader.ReadDebugDirectory().Where(x => x.Type == DebugDirectoryEntryType.PdbChecksum)
+                            .Select(x => peReader.ReadPdbChecksumDebugDirectoryData(x))
+                            .Select(x =>
+                            {
+                                var checksumString = x.Checksum.Aggregate(new StringBuilder(x.Checksum.Length * 2), (sb, b) => sb.AppendFormat(CultureInfo.InvariantCulture, "{0:x2}", b), sb => sb.ToString());
+                                return FormattableString.Invariant($"{x.AlgorithmName}:{checksumString}");
+                            })
+                            .ToImmutableArray();
+
+                        var pdbInfo = new SymbolLocatorPdbInfo(
+                            Path.GetFileName(codeViewEntry.Path),
+                            codeViewEntry.Guid,
+                            (uint)codeViewEntry.Age,
+                            dllPath,
+                            entry.Stamp,
+                            null,
+                            codeViewEntry.Path,
+                            checksums
+                            );
+
+                        var symbolResult = await _debuggerSymbolLocatorService.GetSymbolFileAsync(
+                            pdbInfo,
+                            null,
+                            CancellationToken.None).ConfigureAwait(false);
+
+                        if (symbolResult.Success)
+                        {
+                            var pdbReaderProvider = MetadataReaderProvider.FromPortablePdbStream(symbolResult.SymbolStream!);
+                            result = new DocumentDebugInfoReader(peReader, pdbReaderProvider);
+                        }
+                    }
                 }
             }
             catch (BadImageFormatException)
@@ -93,7 +138,7 @@ namespace Microsoft.CodeAnalysis.PdbSourceDocument
                 }
             }
 
-            return Task.FromResult<DocumentDebugInfoReader?>(result);
+            return result;
         }
 
         private static bool IsPortable(Stream pdbStream)

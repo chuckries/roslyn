@@ -130,6 +130,7 @@
     <PackageReference Include="Microsoft.DiaSymReader" Version="$(MicrosoftDiaSymReaderVersion)" />
     <PackageReference Include="Microsoft.CodeAnalysis.AnalyzerUtilities" Version="$(MicrosoftCodeAnalysisAnalyzerUtilitiesVersion)" />
     <PackageReference Include="Microsoft.VisualStudio.Debugger.Contracts" Version="$(MicrosoftVisualStudioDebuggerContractsVersion)" Condition="'$(DotNetBuildFromSource)' != 'true'" />
+    <PackageReference Include="Microsoft.SourceLink.Tools" Version="1.1.0-beta-21525-02"/>
   </ItemGroup>
   <ItemGroup Condition="'$(DotNetBuildFromSource)' == 'true'">
     <Compile Remove="EditAndContinue\**\*.cs" />

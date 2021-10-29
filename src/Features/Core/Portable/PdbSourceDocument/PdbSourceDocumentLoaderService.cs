@@ -9,39 +9,62 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis.Host.Mef;
+using Microsoft.VisualStudio.Debugger.Contracts;
 
 namespace Microsoft.CodeAnalysis.PdbSourceDocument
 {
     [Export(typeof(IPdbSourceDocumentLoaderService)), Shared]
     internal sealed class PdbSourceDocumentLoaderService : IPdbSourceDocumentLoaderService
     {
+        private readonly IDebuggerSourceLinkService _sourceLinkService;
+
         [ImportingConstructor]
         [Obsolete(MefConstruction.ImportingConstructorMessage, error: true)]
-        public PdbSourceDocumentLoaderService()
+        public PdbSourceDocumentLoaderService(IDebuggerSourceLinkService sourceLinkService)
         {
+            _sourceLinkService = sourceLinkService;
         }
 
-        public Task<TextLoader?> LoadSourceDocumentAsync(SourceDocument sourceDocument, CancellationToken cancellationToken)
+        public async Task<TextLoader?> LoadSourceDocumentAsync(SourceDocument sourceDocument, CancellationToken cancellationToken)
         {
             // If we already have the embedded text then use that directly
             if (sourceDocument.EmbeddedText is not null)
             {
                 var textAndVersion = TextAndVersion.Create(sourceDocument.EmbeddedText, VersionStamp.Default, sourceDocument.FilePath);
-                return Task.FromResult<TextLoader?>(TextLoader.From(textAndVersion));
+                return TextLoader.From(textAndVersion);
             }
 
             // Otherwise, check the easiest (but most unlikely) case which is the document exists on the disk
             if (File.Exists(sourceDocument.FilePath))
             {
                 // TODO: Make sure the hash of the file is correct: https://github.com/dotnet/roslyn/issues/57351
-                return Task.FromResult<TextLoader?>(new FileTextLoader(sourceDocument.FilePath, Encoding.UTF8));
+                return new FileTextLoader(sourceDocument.FilePath, Encoding.UTF8);
             }
 
             // TODO: Call the debugger to download the file
             // Maybe they'll download to a temp file, in which case this method could return a string
             // or maybe they'll return a stream, in which case we could create a new StreamTextLoader
 
-            return Task.FromResult<TextLoader?>(null);
+            if (!string.IsNullOrEmpty(sourceDocument.SourceLinkUri))
+            {
+                var sourceLinkStream = await _sourceLinkService.GetSourceLinkAsync(sourceDocument.SourceLinkUri, CancellationToken.None).ConfigureAwait(false);
+                if (sourceLinkStream is not null)
+                {
+                    using (sourceLinkStream)
+                    {
+                        // hack, copy to tmp location
+                        var tmpPath = Path.GetTempFileName();
+                        using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.ReadWrite))
+                        {
+                            await sourceLinkStream.CopyToAsync(fs, 81920, CancellationToken.None).ConfigureAwait(false);
+                        }
+
+                        return new FileTextLoader(tmpPath, Encoding.UTF8);
+                    }
+                }
+            }
+
+            return null;
         }
     }
 }
